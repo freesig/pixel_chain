@@ -1,26 +1,45 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+use parity_codec::{Decode, Encode};
 /// A runtime module template with necessary imports
 /// For more guidance on Substrate modules, see the example module
 /// https://github.com/paritytech/substrate/blob/v1.0/srml/example/src/lib.rs
-use support::{decl_event, decl_module, decl_storage, dispatch::Result, StorageValue};
+use support::{decl_event, decl_module, decl_storage, dispatch::Result, StorageMap, StorageValue};
 use system::ensure_signed;
+use support::runtime_primitives::traits::Hash;
+use rstd::vec::Vec;
 
 /// The module's configuration trait.
 pub trait Trait: system::Trait {
-    // TODO: Add other types and constants required configure this module.
-
     /// The overarching event type.
     type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 }
 
+#[derive(Encode, Decode, Default, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct Edit {
+    ipfs_addr: IpfsAddress,
+}
+
+#[derive(Encode, Decode, Default, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct GameRules {
+    num_critique_credits: u32,
+    num_votes: u32,
+    initial_time_limit: u64,
+}
+
+pub type IpfsAddress = Vec<u8>;
+
 // This module's storage items.
 decl_storage! {
     trait Store for Module<T: Trait> as TemplateModule {
-        // Just a dummy storage item.
-        // Here we are declaring a StorageValue, `Something` as a Option<u32>
-        // `get(something)` is the default getter which returns either the stored `u32` or `None` if nothing stored
-        Something get(something): Option<u32>;
+        Edits: map T::Hash => Edit;
+        PendingEdit: map (T::AccountId, u32) => T::Hash;
+        NumPendingEdits: map T::AccountId => u32;
+        NumApprovedEdits: map T::AccountId => u32;
+
+        CurrentPic: Option<T::Hash>;
         // Number of critique credits required to
         // submit and edit.
         NumCritiqueCredits get(num_critique_credits): u32;
@@ -30,6 +49,7 @@ decl_storage! {
         // regardless of votes.
         // This is number of milliseconds
         InitialTimeLimit get(initial_time_limit): u64;
+        Nonce: u64;
     }
 }
 
@@ -40,21 +60,65 @@ decl_module! {
         // this is needed only if you are using events in your module
         fn deposit_event<T>() = default;
 
-        // Just a dummy entry point.
-        // function that can be called by the external world as an extrinsics call
-        // takes a parameter of the type `AccountId`, stores it and emits an event
-        pub fn do_something(origin, something: u32) -> Result {
-            // TODO: You only need this if you want to check it was signed.
+        pub fn submit_edit(origin, ipfs_addr: IpfsAddress) -> Result {
             let who = ensure_signed(origin)?;
 
-            // TODO: Code to execute when something calls this.
-            // For example: the following line stores the passed in u32 in the storage
-            <Something<T>>::put(something);
+            // Checks
+            let count = <NumPendingEdits<T>>::get(&who);
+            let new_count = count.checked_add(1)
+                .ok_or("Overflow on number of pending edits")?;
 
-            // here we are raising the Something event
-            Self::deposit_event(RawEvent::SomethingStored(something, who));
+            let edit = Edit {
+                ipfs_addr,
+            };
+
+            let nonce = <Nonce<T>>::get();
+            let edit_id = (<system::Module<T>>::random_seed(), &who, nonce)
+                .using_encoded(<T as system::Trait>::Hashing::hash);
+
+            // Touches storage
+            <Edits<T>>::insert(edit_id, edit);
+            <PendingEdit<T>>::insert(&(who.clone(), count), &edit_id);
+            <NumPendingEdits<T>>::insert(&who, new_count);
+            <Nonce<T>>::mutate(|n| *n += 1);
+
+            Self::deposit_event(RawEvent::SubmitEdit(edit_id, who));
             Ok(())
         }
+
+        pub fn approve_edit(origin, edit: T::Hash) -> Result {
+            let who = ensure_signed(origin)?;
+            // Checks
+            let num_edits = <NumApprovedEdits<T>>::get(&who);
+            let new_num_edits = num_edits.checked_add(1)
+                .ok_or("Overflow on num approved edits")?;
+
+            // Touch Storage
+            <CurrentPic<T>>::put(&edit);
+            <NumApprovedEdits<T>>::insert(who, new_num_edits);
+            Self::deposit_event(RawEvent::ApproveEdit(edit));
+            Ok(())
+        }
+
+        pub fn set_initial_rules(origin, rules: GameRules) -> Result {
+            let who = ensure_signed(origin)?;
+            let GameRules {
+                num_critique_credits,
+                num_votes,
+                initial_time_limit,
+            } = rules;
+            // Touches Storage
+            <NumCritiqueCredits<T>>::put(num_critique_credits);
+            <NumVotes<T>>::put(num_votes);
+            <InitialTimeLimit<T>>::put(initial_time_limit);
+            Ok(())
+        }
+
+        pub fn vote(origin, edit_id: T::Hash) -> Result {
+            let who = ensure_signed(origin)?;
+            Ok(())
+        }
+
     }
 }
 
@@ -62,11 +126,10 @@ decl_event!(
     pub enum Event<T>
     where
         AccountId = <T as system::Trait>::AccountId,
+        <T as system::Trait>::Hash,
     {
-        // Just a dummy event.
-        // Event `Something` is declared with a parameter of the type `u32` and `AccountId`
-        // To emit this event, we call the deposit funtion, from our runtime funtions
-        SomethingStored(u32, AccountId),
+        SubmitEdit(Hash, AccountId),
+        ApproveEdit(Hash),
     }
 );
 
@@ -124,11 +187,38 @@ mod tests {
     #[test]
     fn it_works_for_default_value() {
         with_externalities(&mut new_test_ext(), || {
-            // Just a dummy test for the dummy funtion `do_something`
-            // calling the `do_something` function with a value 42
-            assert_ok!(TemplateModule::do_something(Origin::signed(1), 42));
-            // asserting that the stored value is equal to what we stored
-            assert_eq!(TemplateModule::something(), Some(42));
+            let ipfs_addr = "QmWATWQ7fVPP2EFGu71UkfnqhYXDYH566qy47CnJDgvs8u".as_bytes().to_owned();
+            assert_ok!(TemplateModule::submit_edit(Origin::signed(1), ipfs_addr.clone()));
+            let edit = Edit{ ipfs_addr: ipfs_addr.clone() };
+            let edit_id = <PendingEdit<Test>>::get((1, 0));
+            assert_eq!(<Edits<Test>>::get(edit_id), edit.clone());
+            assert_eq!(<NumPendingEdits<Test>>::get(1), 1);
+            assert_eq!(<CurrentPic<Test>>::get(), None);
+            assert_ok!(TemplateModule::approve_edit(Origin::signed(1), edit_id));
+            let current_pic = <CurrentPic<Test>>::get();
+            assert_eq!(Some(edit_id), current_pic);
+            assert_eq!(<NumApprovedEdits<Test>>::get(1), 1);
+
+            let ipfs_addr = "QmWATWQ7fVPP2EFGu71UkfnqhYXDYH566qy47CnJDgvs8u".as_bytes().to_owned();
+            assert_ok!(TemplateModule::submit_edit(Origin::signed(1), ipfs_addr.clone()));
+            assert_eq!(<NumPendingEdits<Test>>::get(1), 2);
+        });
+    }
+
+
+    #[test]
+    fn set_initial_rules() {
+        with_externalities(&mut new_test_ext(), || {
+            let me = Origin::signed(1);
+            let rules = GameRules {
+                num_critique_credits: 5,
+                num_votes: 5,
+                initial_time_limit: 10000,
+            };
+            assert_ok!(TemplateModule::set_initial_rules(me, rules));
+            assert_eq!(<NumCritiqueCredits<Test>>::get(), 5);
+            assert_eq!(<NumVotes<Test>>::get(), 5);
+            assert_eq!(<InitialTimeLimit<Test>>::get(), 10000);
         });
     }
 }
