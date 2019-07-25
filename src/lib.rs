@@ -35,8 +35,9 @@ pub type IpfsAddress = Vec<u8>;
 decl_storage! {
     trait Store for Module<T: Trait> as TemplateModule {
         Edits: map T::Hash => Edit;
-        PendingEdit: map (T::AccountId, u32) => T::Hash;
+        PendingEdits: map (T::AccountId, u32) => T::Hash;
         NumPendingEdits: map T::AccountId => u32;
+        ApprovedEdits: map (T::AccountId, u32) => T::Hash;
         NumApprovedEdits: map T::AccountId => u32;
 
         CurrentPic: Option<T::Hash>;
@@ -78,7 +79,7 @@ decl_module! {
 
             // Touches storage
             <Edits<T>>::insert(edit_id, edit);
-            <PendingEdit<T>>::insert(&(who.clone(), count), &edit_id);
+            <PendingEdits<T>>::insert(&(who.clone(), count), &edit_id);
             <NumPendingEdits<T>>::insert(&who, new_count);
             <Nonce<T>>::mutate(|n| *n += 1);
 
@@ -92,10 +93,14 @@ decl_module! {
             let num_edits = <NumApprovedEdits<T>>::get(&who);
             let new_num_edits = num_edits.checked_add(1)
                 .ok_or("Overflow on num approved edits")?;
+            let num_pending_edits = <NumPendingEdits<T>>::get(&who);
+            let new_pending_edits = num_pending_edits.checked_sub(1)
+                .ok_or("Underflow on pending edits")?;
 
             // Touch Storage
             <CurrentPic<T>>::put(&edit);
-            <NumApprovedEdits<T>>::insert(who, new_num_edits);
+            <NumApprovedEdits<T>>::insert(&who, new_num_edits);
+            <NumPendingEdits<T>>::insert(who, new_pending_edits);
             Self::deposit_event(RawEvent::ApproveEdit(edit));
             Ok(())
         }
@@ -190,7 +195,7 @@ mod tests {
             let ipfs_addr = "QmWATWQ7fVPP2EFGu71UkfnqhYXDYH566qy47CnJDgvs8u".as_bytes().to_owned();
             assert_ok!(TemplateModule::submit_edit(Origin::signed(1), ipfs_addr.clone()));
             let edit = Edit{ ipfs_addr: ipfs_addr.clone() };
-            let edit_id = <PendingEdit<Test>>::get((1, 0));
+            let edit_id = <PendingEdits<Test>>::get((1, 0));
             assert_eq!(<Edits<Test>>::get(edit_id), edit.clone());
             assert_eq!(<NumPendingEdits<Test>>::get(1), 1);
             assert_eq!(<CurrentPic<Test>>::get(), None);
@@ -198,6 +203,10 @@ mod tests {
             let current_pic = <CurrentPic<Test>>::get();
             assert_eq!(Some(edit_id), current_pic);
             assert_eq!(<NumApprovedEdits<Test>>::get(1), 1);
+            assert_eq!(<NumPendingEdits<Test>>::get(1), 0);
+            let approved_edit = <ApprovedEdits<Test>>::get((1, 0));
+            assert_eq!(edit_id, approved_edit);
+            assert!(!<PendingEdits<Test>>::get((1, 0)).exists());
 
             let ipfs_addr = "QmWATWQ7fVPP2EFGu71UkfnqhYXDYH566qy47CnJDgvs8u".as_bytes().to_owned();
             assert_ok!(TemplateModule::submit_edit(Origin::signed(1), ipfs_addr.clone()));
